@@ -1,4 +1,4 @@
-# bot.py - МИНИМАЛЬНАЯ РАБОЧАЯ ВЕРСИЯ
+# bot.py - ВЕРСИЯ БЕЗ LXML
 import os
 import telebot
 from telebot import types
@@ -6,6 +6,8 @@ import logging
 import requests
 from bs4 import BeautifulSoup
 import re
+import json
+from urllib.parse import urljoin
 
 # Настройка логирования
 logging.basicConfig(
@@ -14,7 +16,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-class MinimalAvitoBot:
+class SimpleAvitoBot:
     def __init__(self, token):
         self.bot = telebot.TeleBot(token)
         self.setup_handlers()
@@ -76,13 +78,37 @@ class MinimalAvitoBot:
             )
             
             # Парсим данные
+            self.bot.edit_message_text(
+                "📦 *Получаю данные...*",
+                chat_id,
+                status_msg.message_id,
+                parse_mode='Markdown'
+            )
+            
             ad_data = self.parse_avito_ad(url)
             
             if not ad_data:
                 raise Exception("Не удалось получить данные объявления")
             
+            # Анализируем
+            self.bot.edit_message_text(
+                "📊 *Анализирую...*",
+                chat_id,
+                status_msg.message_id,
+                parse_mode='Markdown'
+            )
+            
+            analysis = self.analyze_ad(ad_data)
+            
             # Формируем отчет
-            report = self.generate_report(ad_data)
+            self.bot.edit_message_text(
+                "📝 *Формирую отчет...*",
+                chat_id,
+                status_msg.message_id,
+                parse_mode='Markdown'
+            )
+            
+            report = self.generate_report(ad_data, analysis)
             
             # Отправляем результат
             self.bot.edit_message_text(
@@ -109,41 +135,39 @@ class MinimalAvitoBot:
             logger.error(f"❌ Analysis failed: {e}")
     
     def parse_avito_ad(self, url):
-        """Парсинг объявления с Авито"""
+        """Парсинг объявления с Авито без lxml"""
         try:
             headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
                 'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
                 'Accept-Language': 'ru-RU,ru;q=0.8,en-US;q=0.5,en;q=0.3',
+                'Accept-Encoding': 'gzip, deflate, br',
+                'Connection': 'keep-alive',
+                'Upgrade-Insecure-Requests': '1',
             }
             
             response = requests.get(url, headers=headers, timeout=15)
             response.raise_for_status()
             
+            # Используем встроенный html.parser вместо lxml
             soup = BeautifulSoup(response.text, 'html.parser')
             
-            # Извлекаем заголовок
+            # Извлекаем основные данные
             title = self.extract_title(soup)
-            
-            # Извлекаем цену
-            price = self.extract_price(soup)
-            
-            # Извлекаем фотографии
+            price = self.extract_price(soup, response.text)
             images = self.extract_images(soup)
-            
-            # Извлекаем год из заголовка
             year = self.extract_year(title)
-            
-            # Извлекаем регион из URL
             region = self.extract_region(url)
+            mileage = self.extract_mileage(soup, response.text)
             
             return {
                 'title': title,
                 'price': price,
                 'year': year,
                 'region': region,
+                'mileage': mileage,
                 'image_count': len(images),
-                'images': images[:3],  # Только первые 3 фото
+                'images': images[:5],  # Только первые 5 фото
                 'url': url
             }
             
@@ -159,18 +183,24 @@ class MinimalAvitoBot:
                 'h1[data-marker="item-view/title"]',
                 'h1.title-info-title',
                 'h1',
+                '.title-info-title-text',
                 '[data-marker="item-view/title"]'
             ]
             
             for selector in selectors:
                 element = soup.select_one(selector)
-                if element and element.text.strip():
-                    return element.text.strip()
+                if element and element.get_text(strip=True):
+                    return element.get_text(strip=True)
             
             # Если не нашли по селекторам, ищем в мета-тегах
             meta_title = soup.find('meta', property='og:title')
             if meta_title and meta_title.get('content'):
                 return meta_title['content']
+            
+            # Ищем в title страницы
+            page_title = soup.find('title')
+            if page_title:
+                return page_title.get_text(strip=True)
             
             return "Неизвестная модель"
             
@@ -178,7 +208,7 @@ class MinimalAvitoBot:
             logger.error(f"Title extraction error: {e}")
             return "Неизвестная модель"
     
-    def extract_price(self, soup):
+    def extract_price(self, soup, page_text):
         """Извлечение цены"""
         try:
             # Пробуем разные способы найти цену
@@ -187,7 +217,8 @@ class MinimalAvitoBot:
                 'span[data-marker="item-view/item-price"]',
                 '[data-marker="item-view/item-price"]',
                 '.js-item-price',
-                '.price-value'
+                '.price-value',
+                '.style-item-price-text-_w822'
             ]
             
             for selector in price_selectors:
@@ -195,10 +226,12 @@ class MinimalAvitoBot:
                 if element:
                     # Пробуем из атрибута content
                     if element.get('content'):
-                        return int(element['content'])
+                        price_str = element['content']
+                        if price_str.isdigit():
+                            return int(price_str)
                     
                     # Пробуем из текста
-                    price_text = element.text.strip()
+                    price_text = element.get_text(strip=True)
                     numbers = re.findall(r'\d+', price_text.replace(' ', ''))
                     if numbers:
                         return int(''.join(numbers))
@@ -206,7 +239,6 @@ class MinimalAvitoBot:
             # Ищем в JSON-LD
             json_ld = soup.find('script', type='application/ld+json')
             if json_ld:
-                import json
                 try:
                     data = json.loads(json_ld.string)
                     if 'offers' in data and 'price' in data['offers']:
@@ -214,11 +246,20 @@ class MinimalAvitoBot:
                 except:
                     pass
             
-            # Ищем в тексте страницы
-            page_text = soup.get_text()
-            price_match = re.search(r'"price":\s*"(\d+)"', page_text)
-            if price_match:
-                return int(price_match.group(1))
+            # Ищем в тексте страницы с регулярными выражениями
+            price_patterns = [
+                r'"price":\s*"(\d+)"',
+                r'"price":\s*(\d+)',
+                r'itemprop="price".*?content="(\d+)"',
+                r'data-marker="item-view/item-price".*?>.*?(\d[\d\s]*)\s*₽'
+            ]
+            
+            for pattern in price_patterns:
+                matches = re.search(pattern, page_text, re.IGNORECASE | re.DOTALL)
+                if matches:
+                    price_str = matches.group(1).replace(' ', '')
+                    if price_str.isdigit():
+                        return int(price_str)
             
             return 0
             
@@ -236,7 +277,8 @@ class MinimalAvitoBot:
                 'img[data-src]',
                 'img[src*="avito"]',
                 '.gallery-img-cover img',
-                '[data-marker="image-frame/image"]'
+                '[data-marker="image-frame/image"]',
+                '.photo-slider-image-img'
             ]
             
             for selector in img_selectors:
@@ -244,10 +286,18 @@ class MinimalAvitoBot:
                 for img in img_elements[:10]:  # Максимум 10 фото
                     src = img.get('data-src') or img.get('src')
                     if src and src.startswith('http'):
+                        # Нормализуем URL
+                        if src.startswith('//'):
+                            src = 'https:' + src
                         images.append(src)
             
             # Удаляем дубликаты
-            return list(dict.fromkeys(images))
+            unique_images = []
+            for img in images:
+                if img not in unique_images:
+                    unique_images.append(img)
+            
+            return unique_images
             
         except Exception as e:
             logger.error(f"Image extraction error: {e}")
@@ -271,119 +321,212 @@ class MinimalAvitoBot:
                 region_map = {
                     'moskva': 'Москва',
                     'sankt-peterburg': 'Санкт-Петербург',
+                    'spb': 'Санкт-Петербург',
                     'novosibirsk': 'Новосибирск',
                     'ekaterinburg': 'Екатеринбург',
-                    'kazan': 'Казань'
+                    'kazan': 'Казань',
+                    'nizhniy_novgorod': 'Нижний Новгород',
+                    'chelyabinsk': 'Челябинск',
+                    'omsk': 'Омск',
+                    'samara': 'Самара',
+                    'rostov-na-donu': 'Ростов-на-Дону',
+                    'ufa': 'Уфа',
+                    'krasnoyarsk': 'Красноярск',
+                    'voronezh': 'Воронеж',
+                    'perm': 'Пермь',
+                    'volgograd': 'Волгоград'
                 }
                 return region_map.get(region, region.replace('-', ' ').title())
             return "Неизвестно"
         except:
             return "Неизвестно"
     
-    def generate_report(self, ad_data):
-        """Генерация отчета"""
+    def extract_mileage(self, soup, page_text):
+        """Извлечение пробега"""
+        try:
+            # Ищем пробег в тексте
+            mileage_patterns = [
+                r'пробег[^\d]*(\d[\d\s]*)\s*км',
+                r'(\d[\d\s]*)\s*км[^.]*пробег',
+                r'пробег</span>.*?<span[^>]*>.*?(\d[\d\s]*)\s*км',
+                r'"mileage".*?"value".*?"(\d+)"'
+            ]
+            
+            for pattern in mileage_patterns:
+                matches = re.search(pattern, page_text, re.IGNORECASE | re.DOTALL)
+                if matches:
+                    mileage_str = matches.group(1).replace(' ', '')
+                    if mileage_str.isdigit():
+                        return int(mileage_str)
+            
+            return 0
+            
+        except Exception as e:
+            logger.error(f"Mileage extraction error: {e}")
+            return 0
+    
+    def analyze_ad(self, ad_data):
+        """Анализ объявления"""
+        analysis = {
+            'price_analysis': self.analyze_price(ad_data['price']),
+            'photo_analysis': self.analyze_photos(ad_data['image_count']),
+            'mileage_analysis': self.analyze_mileage(ad_data['mileage'], ad_data['year']),
+            'year_analysis': self.analyze_year(ad_data['year']),
+            'recommendations': []
+        }
         
-        # Анализ цены
-        price_analysis = self.analyze_price(ad_data['price'])
-        
-        # Анализ фотографий
-        photo_analysis = self.analyze_photos(ad_data['image_count'])
+        # Генерация рекомендаций
+        recommendations = self.generate_recommendations(ad_data, analysis)
+        analysis['recommendations'] = recommendations
         
         # Общая оценка
-        overall_score = self.calculate_score(ad_data)
+        analysis['overall_score'] = self.calculate_overall_score(ad_data, analysis)
         
-        report = f"""
-🚗 *{ad_data['title']}*
-
-💰 *Цена:* {ad_data['price']:,} руб. {price_analysis['emoji']}
-📅 *Год:* {ad_data['year']}
-📍 *Регион:* {ad_data['region']}
-📸 *Фотографии:* {ad_data['image_count']} {photo_analysis['emoji']}
-
-⭐ *Общая оценка:* {overall_score}/10
-
-💡 *Рекомендации:*
-{self.generate_recommendations(ad_data, price_analysis, photo_analysis)}
-
-🔍 *Советы по осмотру:*
-• Всегда осматривайте автомобиль лично
-• Проверяйте документы и историю
-• Обязательно сделайте тест-драйв
-• Проверьте VIN через официальные сервисы
-        """
-        
-        return report
+        return analysis
     
     def analyze_price(self, price):
         """Анализ цены"""
         if price == 0:
-            return {'emoji': '❓', 'text': 'Цена не указана'}
+            return {'emoji': '❓', 'text': 'Цена не указана', 'score': 3}
         elif price < 100000:
-            return {'emoji': '🚨', 'text': 'Подозрительно низкая цена'}
+            return {'emoji': '🚨', 'text': 'Подозрительно низкая', 'score': 1}
         elif price < 300000:
-            return {'emoji': '💰', 'text': 'Низкая цена'}
+            return {'emoji': '💰', 'text': 'Низкая', 'score': 7}
         elif price < 800000:
-            return {'emoji': '💵', 'text': 'Средняя цена'}
+            return {'emoji': '💵', 'text': 'Средняя', 'score': 8}
         elif price < 2000000:
-            return {'emoji': '💎', 'text': 'Высокая цена'}
+            return {'emoji': '💎', 'text': 'Высокая', 'score': 6}
         else:
-            return {'emoji': '🏎️', 'text': 'Премиум сегмент'}
+            return {'emoji': '🏎️', 'text': 'Премиум', 'score': 5}
     
     def analyze_photos(self, image_count):
         """Анализ фотографий"""
         if image_count == 0:
-            return {'emoji': '❌', 'text': 'Нет фотографий'}
+            return {'emoji': '❌', 'text': 'Нет фото', 'score': 1}
         elif image_count < 3:
-            return {'emoji': '⚠️', 'text': 'Мало фотографий'}
+            return {'emoji': '⚠️', 'text': 'Мало фото', 'score': 5}
         elif image_count < 6:
-            return {'emoji': '✅', 'text': 'Достаточно фото'}
+            return {'emoji': '✅', 'text': 'Достаточно', 'score': 8}
         else:
-            return {'emoji': '📸', 'text': 'Много фото'}
+            return {'emoji': '📸', 'text': 'Много фото', 'score': 9}
     
-    def calculate_score(self, ad_data):
+    def analyze_mileage(self, mileage, year):
+        """Анализ пробега"""
+        if mileage == 0:
+            return {'emoji': '❓', 'text': 'Не указан', 'score': 5}
+        
+        car_age = 2024 - year
+        if car_age <= 0:
+            car_age = 1
+        
+        avg_mileage_per_year = mileage / car_age
+        
+        if avg_mileage_per_year < 10000:
+            return {'emoji': '👍', 'text': 'Низкий пробег', 'score': 9}
+        elif avg_mileage_per_year < 20000:
+            return {'emoji': '✅', 'text': 'Нормальный пробег', 'score': 7}
+        elif avg_mileage_per_year < 30000:
+            return {'emoji': '⚠️', 'text': 'Высокий пробег', 'score': 4}
+        else:
+            return {'emoji': '🚨', 'text': 'Очень высокий пробег', 'score': 2}
+    
+    def analyze_year(self, year):
+        """Анализ года выпуска"""
+        car_age = 2024 - year
+        
+        if car_age <= 3:
+            return {'emoji': '🆕', 'text': 'Новый', 'score': 9}
+        elif car_age <= 7:
+            return {'emoji': '✅', 'text': 'Средний возраст', 'score': 7}
+        elif car_age <= 12:
+            return {'emoji': '⚠️', 'text': 'Старый', 'score': 5}
+        else:
+            return {'emoji': '🚗', 'text': 'Ветеран', 'score': 3}
+    
+    def calculate_overall_score(self, ad_data, analysis):
         """Расчет общей оценки"""
-        score = 5  # Базовая оценка
+        scores = [
+            analysis['price_analysis']['score'],
+            analysis['photo_analysis']['score'],
+            analysis['mileage_analysis']['score'],
+            analysis['year_analysis']['score']
+        ]
         
-        # Бонус за фото
-        if ad_data['image_count'] >= 3:
-            score += 2
-        elif ad_data['image_count'] > 0:
-            score += 1
-        
-        # Бонус за нормальную цену
-        if 100000 <= ad_data['price'] <= 2000000:
-            score += 2
-        elif ad_data['price'] > 0:
-            score += 1
-        
-        # Бонус за год (не старше 20 лет)
-        current_year = 2024
-        if current_year - ad_data['year'] <= 10:
-            score += 1
-        
-        return min(10, score)
+        return round(sum(scores) / len(scores))
     
-    def generate_recommendations(self, ad_data, price_analysis, photo_analysis):
+    def generate_recommendations(self, ad_data, analysis):
         """Генерация рекомендаций"""
         recommendations = []
         
         # Рекомендации по фото
         if ad_data['image_count'] == 0:
-            recommendations.append("• ❌ *Нет фото* - обязательно запросите у продавца")
+            recommendations.append("❌ *Нет фотографий* - обязательно запросите у продавца")
         elif ad_data['image_count'] < 3:
-            recommendations.append("• ⚠️ *Мало фото* - попросите дополнительные фотографии")
+            recommendations.append("⚠️ *Мало фотографий* - попросите дополнительные фото")
         
         # Рекомендации по цене
         if ad_data['price'] == 0:
-            recommendations.append("• ❓ *Цена не указана* - уточните стоимость")
+            recommendations.append("❓ *Цена не указана* - уточните стоимость")
         elif ad_data['price'] < 100000:
-            recommendations.append("• 🚨 *Подозрительно низкая цена* - будьте осторожны")
+            recommendations.append("🚨 *Подозрительно низкая цена* - будьте осторожны, возможны скрытые дефекты")
         
-        # Общие рекомендации
+        # Рекомендации по пробегу
+        if ad_data['mileage'] > 0:
+            car_age = 2024 - ad_data['year']
+            if car_age > 0:
+                avg_mileage = ad_data['mileage'] / car_age
+                if avg_mileage > 30000:
+                    recommendations.append("⚠️ *Очень высокий пробег* - проверьте состояние двигателя и ходовой")
+        
+        # Рекомендации по году
+        if 2024 - ad_data['year'] > 15:
+            recommendations.append("🕰️ *Автомобиль старше 15 лет* - проверьте техническое состояние")
+        
         if not recommendations:
-            recommendations.append("• ✅ *Объявление выглядит нормально* - можно договариваться о осмотре")
+            recommendations.append("✅ *Объявление выглядит нормально* - можно договариваться о осмотре")
         
-        return "\n".join(recommendations)
+        return recommendations
+    
+    def generate_report(self, ad_data, analysis):
+        """Генерация отчета"""
+        
+        report = f"""
+🚗 *{ad_data['title']}*
+
+💰 *Цена:* {ad_data['price']:,} руб. {analysis['price_analysis']['emoji']}
+📅 *Год:* {ad_data['year']} {analysis['year_analysis']['emoji']}
+🏁 *Пробег:* {ad_data['mileage']:,} км {analysis['mileage_analysis']['emoji']}
+📍 *Регион:* {ad_data['region']}
+📸 *Фотографии:* {ad_data['image_count']} {analysis['photo_analysis']['emoji']}
+
+⭐ *Общая оценка:* {analysis['overall_score']}/10
+
+📊 *Детальный анализ:*
+• Цена: {analysis['price_analysis']['text']}
+• Фото: {analysis['photo_analysis']['text']}
+• Пробег: {analysis['mileage_analysis']['text']}
+• Возраст: {analysis['year_analysis']['text']}
+
+💡 *Рекомендации:*
+"""
+        
+        # Добавляем рекомендации
+        for rec in analysis['recommendations']:
+            report += f"• {rec}\n"
+        
+        report += f"""
+🔍 *Советы по осмотру:*
+• Всегда осматривайте автомобиль лично
+• Проверяйте документы и VIN
+• Сделайте тест-драйв
+• Проверьте историю через онлайн-сервисы
+• Осмотрите кузов на предмет ржавчины и вмятин
+
+🎯 *Следующие шаги:*
+Свяжитесь с продавцом и договоритесь о осмотре!
+        """
+        
+        return report
     
     def handle_text(self, message):
         chat_id = message.chat.id
@@ -409,12 +552,14 @@ class MinimalAvitoBot:
 • 📊 Основные параметры автомобиля
 • 💰 Адекватность цены
 • 📸 Наличие и количество фотографий
+• 🏁 Пробег и его соответствие возрасту
+• 📅 Год выпуска и возраст автомобиля
 • 📍 Регион продажи
 
 *Пример работы:*
 Отправьте: `https://www.avito.ru/moskva/avtomobili/volkswagen_golf_2018...`
 
-*Примечание:* Я только помогают с первичным анализом. Всегда проверяйте автомобиль лично!
+*Примечание:* Я только помогаю с первичным анализом. Всегда проверяйте автомобиль лично!
             """
             self.bot.send_message(chat_id, help_text, parse_mode='Markdown')
         
@@ -444,5 +589,5 @@ if __name__ == "__main__":
         exit(1)
     
     # Создаем и запускаем бота
-    bot = MinimalAvitoBot(token)
+    bot = SimpleAvitoBot(token)
     bot.run()
