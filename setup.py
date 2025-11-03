@@ -1,0 +1,26 @@
+# setup.py
+from setuptools import setup, find_packages
+
+setup(
+    name="auto-inspect-bot",
+    version="1.0.0",
+    packages=find_packages(),
+    install_requires=[
+        "pyTelegramBotAPI==4.15.0",
+        "requests==2.31.0",
+        "beautifulsoup4==4.12.2",
+        "lxml==4.9.3",
+        "opencv-python-headless==4.8.1.78",
+        "numpy==1.24.3",
+        "Pillow==10.0.1",
+        "psycopg2-binary==2.9.7",
+        "SQLAlchemy==2.0.23", 
+        "apscheduler==3.10.4",
+        "python-dotenv==1.0.0",
+        "aiohttp==3.8.5",
+        "flask==2.3.3",
+        "scikit-learn==1.3.0",
+        "scipy==1.11.1",
+    ],
+    python_requires=">=3.8,<3.12",
+)
