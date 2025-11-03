@@ -1,5 +1,7 @@
-# requirements.txt - БЕЗ LXML
 pyTelegramBotAPI==4.15.0
 requests==2.31.0
 beautifulsoup4==4.12.2
 python-dotenv==1.0.0
+Pillow==10.0.0
+numpy==1.24.3
+opencv-python-headless==4.8.1.78
