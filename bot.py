@@ -1,4 +1,4 @@
-# bot.py - ПОЛНЫЙ КОД С ПОДДЕРЖКОЙ АВИТО И DROM
+# bot.py - ПОЛНЫЙ КОД С АНАЛИЗОМ ЛКП
 import os
 import telebot
 from telebot import types
@@ -8,6 +8,10 @@ from bs4 import BeautifulSoup
 import re
 import json
 import time
+import cv2
+import numpy as np
+from PIL import Image
+import io
 
 # Настройка логирования
 logging.basicConfig(
@@ -28,9 +32,211 @@ def reset_webhook(token):
     except Exception as e:
         logger.warning(f"⚠️ Webhook reset failed: {e}")
 
+class PaintAnalyzer:
+    def __init__(self):
+        self.logger = logging.getLogger(__name__)
+    
+    def analyze_paint_from_urls(self, image_urls):
+        """Анализ ЛКП по ссылкам на изображения"""
+        if not image_urls:
+            return {'error': 'Нет изображений для анализа', 'score': 0}
+        
+        analyses = []
+        analyzed_count = 0
+        
+        for img_url in image_urls[:3]:  # Анализируем первые 3 фото
+            try:
+                analysis = self.analyze_single_image(img_url)
+                if analysis and analysis.get('score', 0) > 0:
+                    analyses.append(analysis)
+                    analyzed_count += 1
+                    self.logger.info(f"✅ Analyzed image {analyzed_count}")
+            except Exception as e:
+                self.logger.error(f"Ошибка анализа изображения: {e}")
+                continue
+        
+        if not analyses:
+            return {'error': 'Не удалось проанализировать изображения', 'score': 0}
+        
+        return self.aggregate_analyses(analyses, analyzed_count)
+    
+    def analyze_single_image(self, image_url):
+        """Анализ одного изображения"""
+        try:
+            # Скачиваем изображение
+            response = requests.get(image_url, timeout=15)
+            if response.status_code != 200:
+                return None
+            
+            # Конвертируем в numpy array
+            image = Image.open(io.BytesIO(response.content))
+            img_array = np.array(image)
+            
+            # Пропускаем маленькие изображения
+            if img_array.shape[0] < 100 or img_array.shape[1] < 100:
+                return None
+            
+            # Конвертируем в BGR для OpenCV если нужно
+            if len(img_array.shape) == 3 and img_array.shape[2] == 3:
+                if img_array.shape[2] == 3:
+                    img_array = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
+            else:
+                # Если изображение grayscale, пропускаем
+                return None
+            
+            return self.analyze_image_features(img_array)
+            
+        except Exception as e:
+            self.logger.error(f"Image analysis error: {e}")
+            return None
+    
+    def analyze_image_features(self, img_array):
+        """Анализ характеристик изображения для оценки ЛКП"""
+        try:
+            # Предобработка
+            processed_img = self.preprocess_image(img_array)
+            
+            # Анализ различных характеристик
+            color_uniformity = self.analyze_color_uniformity(processed_img)
+            edge_analysis = self.analyze_edges(processed_img)
+            texture_analysis = self.analyze_texture(processed_img)
+            brightness_analysis = self.analyze_brightness(processed_img)
+            
+            # Расчет общего скора
+            overall_score = self.calculate_paint_score(
+                color_uniformity, edge_analysis, texture_analysis, brightness_analysis
+            )
+            
+            return {
+                'score': overall_score,
+                'color_uniformity': color_uniformity,
+                'edge_quality': edge_analysis,
+                'texture_smoothness': texture_analysis,
+                'brightness_level': brightness_analysis
+            }
+            
+        except Exception as e:
+            self.logger.error(f"Feature analysis error: {e}")
+            return {'score': 0}
+    
+    def preprocess_image(self, img_array):
+        """Предобработка изображения"""
+        # Увеличение резкости
+        kernel = np.array([[-1,-1,-1], [-1,9,-1], [-1,-1,-1]])
+        sharpened = cv2.filter2D(img_array, -1, kernel)
+        
+        # Нормализация освещения
+        lab = cv2.cvtColor(sharpened, cv2.COLOR_BGR2LAB)
+        lab[:,:,0] = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8)).apply(lab[:,:,0])
+        normalized = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
+        
+        return normalized
+    
+    def analyze_color_uniformity(self, img_array):
+        """Анализ равномерности цвета"""
+        hsv = cv2.cvtColor(img_array, cv2.COLOR_BGR2HSV)
+        
+        # Стандартное отклонение оттенка (меньше = равномернее)
+        hue_std = np.std(hsv[:,:,0])
+        saturation_std = np.std(hsv[:,:,1])
+        
+        # Оценка равномерности (0-100)
+        uniformity_score = max(0, 100 - (hue_std * 0.5 + saturation_std * 0.2))
+        
+        return min(100, uniformity_score)
+    
+    def analyze_edges(self, img_array):
+        """Анализ резкости и границ"""
+        gray = cv2.cvtColor(img_array, cv2.COLOR_BGR2GRAY)
+        
+        # Детекция краев (больше краев = более детализированное изображение)
+        edges = cv2.Canny(gray, 50, 150)
+        edge_density = np.sum(edges > 0) / edges.size
+        
+        # Оценка резкости (0-100)
+        sharpness_score = min(100, edge_density * 1000)
+        
+        return sharpness_score
+    
+    def analyze_texture(self, img_array):
+        """Анализ текстуры поверхности"""
+        gray = cv2.cvtColor(img_array, cv2.COLOR_BGR2GRAY)
+        
+        # Вычисление лапласиана для оценки текстуры
+        laplacian_var = cv2.Laplacian(gray, cv2.CV_64F).var()
+        
+        # Оценка гладкости (меньше вариация = глаже поверхность)
+        smoothness_score = max(0, 100 - laplacian_var * 0.1)
+        
+        return min(100, smoothness_score)
+    
+    def analyze_brightness(self, img_array):
+        """Анализ яркости изображения"""
+        hsv = cv2.cvtColor(img_array, cv2.COLOR_BGR2HSV)
+        avg_brightness = np.mean(hsv[:,:,2])
+        
+        # Идеальная яркость ~50-80%
+        if 50 <= avg_brightness <= 80:
+            brightness_score = 90
+        elif 30 <= avg_brightness < 50 or 80 < avg_brightness <= 120:
+            brightness_score = 70
+        else:
+            brightness_score = 40
+        
+        return brightness_score
+    
+    def calculate_paint_score(self, color_uniformity, edge_quality, texture_smoothness, brightness_level):
+        """Расчет общего скора ЛКП"""
+        weights = {
+            'color_uniformity': 0.4,    # Самый важный показатель
+            'edge_quality': 0.3,        # Резкость и детализация
+            'texture_smoothness': 0.2,  # Гладкость поверхности
+            'brightness_level': 0.1     # Качество освещения
+        }
+        
+        total_score = (
+            color_uniformity * weights['color_uniformity'] +
+            edge_quality * weights['edge_quality'] +
+            texture_smoothness * weights['texture_smoothness'] +
+            brightness_level * weights['brightness_level']
+        )
+        
+        return min(100, int(total_score))
+    
+    def aggregate_analyses(self, analyses, count):
+        """Агрегация результатов анализа"""
+        if not analyses:
+            return {'score': 0, 'message': 'Нет данных для анализа'}
+        
+        total_score = sum(analysis['score'] for analysis in analyses)
+        avg_score = total_score / len(analyses)
+        
+        # Определяем качество ЛКП по среднему скору
+        if avg_score >= 80:
+            condition = "отличное"
+            emoji = "🎨"
+        elif avg_score >= 60:
+            condition = "хорошее" 
+            emoji = "✅"
+        elif avg_score >= 40:
+            condition = "удовлетворительное"
+            emoji = "⚠️"
+        else:
+            condition = "требует внимания"
+            emoji = "🔧"
+        
+        return {
+            'score': int(avg_score),
+            'condition': condition,
+            'emoji': emoji,
+            'analyzed_images': count,
+            'message': f"Проанализировано {count} изображений"
+        }
+
 class SimpleAvitoBot:
     def __init__(self, token):
         self.bot = telebot.TeleBot(token)
+        self.paint_analyzer = PaintAnalyzer()
         self.setup_handlers()
         logger.info("✅ Bot initialized successfully!")
     
@@ -65,14 +271,14 @@ class SimpleAvitoBot:
 • 🅰️ Авито
 • 🇩 Drom.ru
 
-*Как использовать:*
-1. Отправьте ссылку на объявление
-2. Получите базовый анализ  
-3. Проверьте рекомендации
+*Что я анализирую:*
+• 📊 Основные параметры авто
+• 💰 Адекватность цены  
+• 🎨 Состояние ЛКП по фото
+• 📸 Качество фотографий
 
-*Примеры ссылок:*
-`https://www.avito.ru/...`
-`https://auto.drom.ru/...`
+*Как использовать:*
+Просто отправьте ссылку на объявление!
 
 Нажмите кнопку ниже чтобы начать! 👇
         """
@@ -111,13 +317,24 @@ class SimpleAvitoBot:
                 raise Exception("Не удалось получить данные объявления")
             
             self.bot.edit_message_text(
-                "📊 *Анализирую...*",
+                "📊 *Анализирую параметры...*",
                 chat_id,
                 status_msg.message_id,
                 parse_mode='Markdown'
             )
             
             analysis = self.analyze_ad(ad_data)
+            
+            self.bot.edit_message_text(
+                "🎨 *Анализирую ЛКП по фото...*",
+                chat_id,
+                status_msg.message_id,
+                parse_mode='Markdown'
+            )
+            
+            # Анализ ЛКП
+            paint_analysis = self.paint_analyzer.analyze_paint_from_urls(ad_data['images'])
+            analysis['paint_analysis'] = paint_analysis
             
             self.bot.edit_message_text(
                 "📝 *Формирую отчет...*",
@@ -177,13 +394,24 @@ class SimpleAvitoBot:
                 raise Exception("Не удалось получить данные объявления")
             
             self.bot.edit_message_text(
-                "📊 *Анализирую...*",
+                "📊 *Анализирую параметры...*",
                 chat_id,
                 status_msg.message_id,
                 parse_mode='Markdown'
             )
             
             analysis = self.analyze_ad(ad_data)
+            
+            self.bot.edit_message_text(
+                "🎨 *Анализирую ЛКП по фото...*",
+                chat_id,
+                status_msg.message_id,
+                parse_mode='Markdown'
+            )
+            
+            # Анализ ЛКП
+            paint_analysis = self.paint_analyzer.analyze_paint_from_urls(ad_data['images'])
+            analysis['paint_analysis'] = paint_analysis
             
             self.bot.edit_message_text(
                 "📝 *Формирую отчет...*",
@@ -246,7 +474,7 @@ class SimpleAvitoBot:
                 'year': year,
                 'region': region,
                 'image_count': len(images),
-                'images': images[:5],
+                'images': images,
                 'url': url,
                 'source': 'avito'
             }
@@ -285,7 +513,7 @@ class SimpleAvitoBot:
                 'year': year,
                 'region': region,
                 'image_count': len(images),
-                'images': images[:5],
+                'images': images,
                 'url': url,
                 'source': 'drom'
             }
@@ -670,6 +898,7 @@ class SimpleAvitoBot:
     
     def generate_report(self, ad_data, analysis):
         source_emoji = "🅰️" if ad_data['source'] == 'avito' else "🇩"
+        paint_analysis = analysis.get('paint_analysis', {})
         
         report = f"""
 {source_emoji} *{ad_data['title']}*
@@ -680,6 +909,10 @@ class SimpleAvitoBot:
 📸 *Фотографии:* {ad_data['image_count']} {analysis['photo_analysis']['emoji']}
 
 ⭐ *Общая оценка:* {analysis['overall_score']}/10
+
+🎨 *Анализ ЛКП:* {paint_analysis.get('score', 0)}/100 {paint_analysis.get('emoji', '❓')}
+• Состояние: {paint_analysis.get('condition', 'не определено')}
+• {paint_analysis.get('message', 'Анализ не выполнен')}
 
 📊 *Детальный анализ:*
 • Цена: {analysis['price_analysis']['text']}
@@ -692,12 +925,23 @@ class SimpleAvitoBot:
         for rec in analysis['recommendations']:
             report += f"• {rec}\n"
         
+        # Добавляем рекомендации по ЛКП
+        paint_score = paint_analysis.get('score', 0)
+        if paint_score > 0:
+            if paint_score < 40:
+                report += "• 🎨 *Состояние ЛКП плохое* - возможны царапины и дефекты\n"
+            elif paint_score < 70:
+                report += "• 🎨 *Состояние ЛКП среднее* - рекомендуется осмотр\n"
+            else:
+                report += "• 🎨 *Состояние ЛКП хорошее* - по фото выглядит отлично\n"
+        
         report += f"""
 🔍 *Советы по осмотру:*
 • Всегда осматривайте автомобиль лично
 • Проверяйте документы и VIN
 • Сделайте тест-драйв
 • Проверьте историю через онлайн-сервисы
+• Особое внимание уделите состоянию кузова
 
 🎯 *Следующие шаги:*
 Свяжитесь с продавцом и договоритесь о осмотре!
@@ -724,23 +968,23 @@ class SimpleAvitoBot:
 • 🅰️ Авито (avito.ru)
 • 🇩 Drom.ru (auto.drom.ru)
 
-*Как использовать:*
-1. Отправьте ссылку на объявление
-2. Я проанализирую основные параметры
-3. Вы получите подробный отчет с рекомендациями
-
-*Что я проверяю:*
+*Что я анализирую:*
 • 📊 Основные параметры автомобиля
 • 💰 Адекватность цены
-• 📸 Наличие и количество фотографий
+• 🎨 Состояние ЛКП по фотографиям (компьютерное зрение)
+• 📸 Наличие и качество фотографий
 • 📅 Год выпуска и возраст автомобиля
-• 📍 Регион продажи
+
+*Как использовать:*
+1. Отправьте ссылку на объявление
+2. Я проанализирую все параметры
+3. Вы получите подробный отчет с оценкой ЛКП
 
 *Примеры ссылок:*
 `https://www.avito.ru/moskva/avtomobili/...`
 `https://auto.drom.ru/volkswagen/golf/...`
 
-*Примечание:* Я только помогаю с первичным анализом. Всегда проверяйте автомобиль лично!
+*Примечание:* Анализ ЛКП выполняется автоматически по фотографиям. Всегда проверяйте автомобиль лично!
             """
             self.bot.send_message(chat_id, help_text, parse_mode='Markdown')
         
