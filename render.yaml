@@ -4,14 +4,9 @@ services:
     name: auto-inspect-bot
     env: python
     plan: free
-    buildCommand: pip install -e .
+    buildCommand: pip install -r requirements.txt
     startCommand: python bot.py
+    pythonVersion: "3.11"
     envVars:
       - key: BOT_TOKEN
         sync: false
-
-databases:
-  - name: auto-inspect-db
-    plan: free
-    databaseName: auto_inspect
-    user: auto_inspect_user
