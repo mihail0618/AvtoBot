@@ -1,18 +1,14 @@
-# render.yaml - УПРОЩЕННАЯ ВЕРСИЯ
+# render.yaml
 services:
   - type: web
     name: auto-inspect-bot
     env: python
     plan: free
-    buildCommand: pip install -r requirements.txt
+    buildCommand: pip install -e .
     startCommand: python bot.py
     envVars:
       - key: BOT_TOKEN
         sync: false
-      - key: DATABASE_URL
-        fromDatabase:
-          name: auto-inspect-db
-          property: connectionString
 
 databases:
   - name: auto-inspect-db
