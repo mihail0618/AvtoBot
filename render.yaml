@@ -1,6 +1,5 @@
-# render.yaml
+# render.yaml - УПРОЩЕННАЯ ВЕРСИЯ
 services:
-  # Веб-сервис для бота
   - type: web
     name: auto-inspect-bot
     env: python
@@ -14,11 +13,9 @@ services:
         fromDatabase:
           name: auto-inspect-db
           property: connectionString
-      - key: RENDER
-        value: true
 
-  # База данных PostgreSQL
-  - type: pgsql
-    name: auto-inspect-db
+databases:
+  - name: auto-inspect-db
     plan: free
-    ipAllowList: []
+    databaseName: auto_inspect
+    user: auto_inspect_user
